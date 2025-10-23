@@ -1,0 +1,518 @@
+<script lang="ts">
+	import { enhance } from '$app/forms';
+	import { invalidateAll } from '$app/navigation';
+	import { onMount, onDestroy } from 'svelte';
+	import QRCode from 'qrcode';
+	
+	const { data } = $props();
+	const { event, orderedGroups, isHost, votingSession, currentUser } = data;
+	
+	let qrCodeUrl = $state('');
+	let showJoinModal = $state(false);
+	let displayName = $state('');
+	let timerSeconds = $state(0);
+	let timerRunning = $state(false);
+	let timerInterval: ReturnType<typeof setInterval> | null = null;
+	let ratings = $state<Record<string, number>>({});
+	let hoveredStars = $state<Record<string, number>>({});
+	let hasVotedForCurrent = $state(false);
+	let pollInterval: ReturnType<typeof setInterval> | null = null;
+	
+	// Get voting URL
+	const votingUrl = $derived(() => {
+		if (typeof window === 'undefined') return '';
+		return `${window.location.origin}/night/${event.joinCode}/live`;
+	});
+	
+	// Current presentation
+	const currentPresentation = $derived(() => {
+		if (!event.currentPresentationId) return null;
+		return orderedGroups.find((g: any) => g.id === event.currentPresentationId);
+	});
+	
+	// Check if user can vote
+	const canVote = $derived(!!votingSession || !!currentUser);
+	
+	// Format timer display
+	const timerDisplay = $derived(() => {
+		const mins = Math.floor(timerSeconds / 60);
+		const secs = timerSeconds % 60;
+		return `${mins}:${secs.toString().padStart(2, '0')}`;
+	});
+	
+	// Initialize ratings for current presentation
+	$effect(() => {
+		if (currentPresentation) {
+			const newRatings: Record<string, number> = {};
+			event.categories.forEach((cat: any) => {
+				newRatings[cat.id] = ratings[cat.id] || 0;
+			});
+			ratings = newRatings;
+			hasVotedForCurrent = false;
+		}
+	});
+	
+	onMount(async () => {
+		// Generate QR code
+		if (isHost) {
+			try {
+				qrCodeUrl = await QRCode.toDataURL(votingUrl());
+			} catch (err) {
+				console.error('Failed to generate QR code:', err);
+			}
+		}
+		
+		// Poll for updates every 3 seconds
+		pollInterval = setInterval(() => {
+			invalidateAll();
+		}, 3000);
+	});
+	
+	onDestroy(() => {
+		if (timerInterval) clearInterval(timerInterval);
+		if (pollInterval) clearInterval(pollInterval);
+	});
+	
+	function startPresentation(groupId: string) {
+		// Set current presentation via form action
+		const form = document.createElement('form');
+		form.method = 'POST';
+		form.action = '?/setCurrentPresentation';
+		
+		const input = document.createElement('input');
+		input.type = 'hidden';
+		input.name = 'groupId';
+		input.value = groupId;
+		form.appendChild(input);
+		
+		document.body.appendChild(form);
+		form.requestSubmit();
+		document.body.removeChild(form);
+		
+		// Start timer if there's a time limit
+		if (event.maxPresentationTime) {
+			startTimer(event.maxPresentationTime);
+		}
+	}
+	
+	function startTimer(minutes: number) {
+		stopTimer();
+		timerSeconds = minutes * 60;
+		timerRunning = true;
+		
+		timerInterval = setInterval(() => {
+			if (timerSeconds > 0) {
+				timerSeconds--;
+			} else {
+				stopTimer();
+				if (typeof window !== 'undefined') {
+					alert('Time is up!');
+				}
+			}
+		}, 1000);
+	}
+	
+	function pauseTimer() {
+		timerRunning = false;
+		if (timerInterval) {
+			clearInterval(timerInterval);
+			timerInterval = null;
+		}
+	}
+	
+	function stopTimer() {
+		pauseTimer();
+		timerSeconds = 0;
+	}
+	
+	function nextPresentation() {
+		const currentIdx = orderedGroups.findIndex((g: any) => g.id === event.currentPresentationId);
+		if (currentIdx < orderedGroups.length - 1) {
+			startPresentation(orderedGroups[currentIdx + 1].id);
+		}
+	}
+	
+	function previousPresentation() {
+		const currentIdx = orderedGroups.findIndex((g: any) => g.id === event.currentPresentationId);
+		if (currentIdx > 0) {
+			startPresentation(orderedGroups[currentIdx - 1].id);
+		}
+	}
+	
+	function endPresentation() {
+		stopTimer();
+		// Clear current presentation
+		const form = document.createElement('form');
+		form.method = 'POST';
+		form.action = '?/setCurrentPresentation';
+		
+		const input = document.createElement('input');
+		input.type = 'hidden';
+		input.name = 'groupId';
+		input.value = '';
+		form.appendChild(input);
+		
+		document.body.appendChild(form);
+		form.requestSubmit();
+		document.body.removeChild(form);
+	}
+	
+	function setRating(categoryId: string, stars: number) {
+		ratings = { ...ratings, [categoryId]: stars };
+	}
+	
+	function setHoveredStars(categoryId: string, stars: number) {
+		hoveredStars = { ...hoveredStars, [categoryId]: stars };
+	}
+	
+	function clearHoveredStars(categoryId: string) {
+		const { [categoryId]: _, ...rest } = hoveredStars;
+		hoveredStars = rest;
+	}
+</script>
+
+<div class="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900">
+	<!-- Start Screen / Join Screen (when no presentation is active) -->
+	{#if !currentPresentation}
+		<div class="min-h-screen flex items-center justify-center p-8">
+			<div class="bg-white/10 backdrop-blur-xl rounded-3xl p-12 max-w-2xl w-full border border-white/20 shadow-2xl">
+				<h1 class="text-5xl font-bold text-white mb-8 text-center">
+					{event.name}
+				</h1>
+				
+				{#if isHost}
+					<div class="mb-12">
+						<h2 class="text-2xl font-semibold text-white mb-6 text-center">
+							Scan to Join & Vote
+						</h2>
+						
+						{#if qrCodeUrl}
+							<div class="bg-white rounded-2xl p-8 mb-6 flex justify-center">
+								<img src={qrCodeUrl} alt="Join QR Code" class="w-64 h-64" />
+							</div>
+						{/if}
+						
+						<div class="bg-white/20 rounded-xl p-4 mb-8">
+							<p class="text-white text-center font-mono text-lg break-all">
+								{votingUrl()}
+							</p>
+						</div>
+						
+						<p class="text-white/80 text-center mb-8">
+							Voters can scan the QR code or visit the link to join
+						</p>
+					</div>
+					
+					<div class="space-y-4">
+						<h3 class="text-xl font-semibold text-white mb-4">Host Controls</h3>
+						
+						{#if orderedGroups.length > 0}
+							<button
+								onclick={() => startPresentation(orderedGroups[0].id)}
+								class="w-full py-4 bg-green-600 hover:bg-green-700 text-white rounded-xl font-semibold text-lg transition-all transform hover:scale-105 shadow-lg"
+							>
+								🎬 Start First Presentation
+							</button>
+						{:else}
+							<div class="bg-yellow-500/20 border border-yellow-500/50 rounded-xl p-6 text-center">
+								<p class="text-white">
+									No presentations submitted yet. Waiting for groups to submit...
+								</p>
+							</div>
+						{/if}
+					</div>
+				{:else if !votingSession && !currentUser}
+					<!-- Not logged in and no voting session - show join button -->
+					<div class="text-center">
+						<p class="text-white text-xl mb-8">
+							Welcome! Join as a voter to rate presentations.
+						</p>
+						
+						<button
+							onclick={() => showJoinModal = true}
+							class="px-8 py-4 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-semibold text-lg transition-all transform hover:scale-105 shadow-lg"
+						>
+							Join as Voter
+						</button>
+					</div>
+				{:else}
+					<!-- Logged in user or has voting session - waiting for host to start -->
+					<div class="text-center">
+						<div class="mb-8">
+							<div class="w-24 h-24 mx-auto mb-6 relative">
+								<div class="absolute inset-0 bg-purple-500 rounded-full animate-ping opacity-20"></div>
+								<div class="absolute inset-0 bg-purple-600 rounded-full flex items-center justify-center">
+									<span class="text-4xl">⏳</span>
+								</div>
+							</div>
+							<h2 class="text-3xl font-bold text-white mb-4">
+								Waiting to Start
+							</h2>
+							<p class="text-white/80 text-lg">
+								The host will start the presentations shortly...
+							</p>
+						</div>
+						
+						{#if votingSession}
+							<div class="bg-white/10 rounded-xl p-4">
+								<p class="text-white/70 text-sm">
+									Joined as: <span class="font-semibold text-white">{votingSession.displayName}</span>
+								</p>
+							</div>
+						{/if}
+					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+	
+	<!-- Active Presentation Screen -->
+	{#if currentPresentation}
+		<div class="min-h-screen p-8">
+			<div class="max-w-6xl mx-auto">
+				<!-- Header with Timer -->
+				<div class="bg-white/10 backdrop-blur-xl rounded-2xl p-6 mb-8 border border-white/20 shadow-xl">
+					<div class="flex justify-between items-center">
+						<div>
+							<h2 class="text-3xl font-bold text-white mb-2">
+								{currentPresentation.name}
+							</h2>
+							<p class="text-white/70">
+								Presented by: {currentPresentation.members?.map((m: any) => m.user.name).join(', ') || 'Unknown'}
+							</p>
+						</div>
+						
+						{#if event.maxPresentationTime && timerSeconds > 0}
+							<div class="text-center">
+								<div class="text-6xl font-bold text-white mb-2 font-mono">
+									{timerDisplay()}
+								</div>
+								<p class="text-white/70">Time Remaining</p>
+							</div>
+						{/if}
+					</div>
+				</div>
+				
+				<!-- Voting Section -->
+				{#if canVote}
+					<div class="bg-white/10 backdrop-blur-xl rounded-2xl p-8 mb-8 border border-white/20 shadow-xl">
+						<h3 class="text-2xl font-bold text-white mb-6 text-center">
+							Rate This Presentation
+						</h3>
+						
+						{#if !hasVotedForCurrent}
+							<form
+								method="POST"
+								action="?/submitVote{votingSession ? `&session=${votingSession.sessionCode}` : ''}"
+								use:enhance={() => {
+									return async ({ result }) => {
+										if (result.type === 'success') {
+											hasVotedForCurrent = true;
+											setTimeout(() => {
+												invalidateAll();
+											}, 500);
+										}
+									};
+								}}
+							>
+								<input type="hidden" name="groupId" value={currentPresentation.id} />
+								<input type="hidden" name="ratings" value={JSON.stringify(
+									event.categories.map((cat: any) => ({
+										categoryId: cat.id,
+										stars: ratings[cat.id] || 0
+									}))
+								)} />
+								
+								<div class="space-y-6 mb-8">
+									{#each event.categories as category}
+										<div class="bg-white/5 rounded-xl p-6">
+											<h4 class="text-xl font-semibold text-white mb-4">
+												{category.name}
+											</h4>
+											{#if category.description}
+												<p class="text-white/60 text-sm mb-4">{category.description}</p>
+											{/if}
+											
+											<div class="flex gap-2 justify-center">
+												{#each [1, 2, 3, 4, 5] as star}
+													<button
+														type="button"
+														onclick={() => setRating(category.id, star)}
+														onmouseenter={() => setHoveredStars(category.id, star)}
+														onmouseleave={() => clearHoveredStars(category.id)}
+														class="transition-all transform hover:scale-125"
+													>
+														<svg
+															class="w-12 h-12 transition-all duration-200"
+															fill={(hoveredStars[category.id] || ratings[category.id] || 0) >= star ? '#FFD700' : 'none'}
+															stroke={(hoveredStars[category.id] || ratings[category.id] || 0) >= star ? '#FFD700' : '#FFFFFF'}
+															stroke-width="2"
+															viewBox="0 0 24 24"
+														>
+															<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+														</svg>
+													</button>
+												{/each}
+											</div>
+										</div>
+									{/each}
+								</div>
+								
+								<button
+									type="submit"
+									disabled={Object.values(ratings).some(r => r === 0)}
+									class="w-full py-4 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 disabled:from-gray-600 disabled:to-gray-700 disabled:cursor-not-allowed text-white rounded-xl font-semibold text-lg transition-all transform hover:scale-105 shadow-lg"
+								>
+									Submit Vote
+								</button>
+							</form>
+						{:else}
+							<div class="bg-green-500/20 border border-green-500/50 rounded-xl p-8 text-center">
+								<svg class="w-16 h-16 text-green-400 mx-auto mb-4" fill="currentColor" viewBox="0 0 20 20">
+									<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+								</svg>
+								<p class="text-white text-xl font-semibold">
+									Vote Submitted! 🎉
+								</p>
+								<p class="text-white/70 mt-2">
+									Thank you for voting on this presentation
+								</p>
+							</div>
+						{/if}
+					</div>
+				{/if}
+				
+				<!-- Host Controls -->
+				{#if isHost}
+					<div class="bg-white/10 backdrop-blur-xl rounded-2xl p-6 border border-white/20 shadow-xl">
+						<h3 class="text-xl font-bold text-white mb-4">Host Controls</h3>
+						
+						<div class="flex gap-4 flex-wrap">
+							{#if event.maxPresentationTime}
+								{#if timerRunning}
+									<button
+										onclick={pauseTimer}
+										class="px-6 py-3 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-semibold transition"
+									>
+										⏸ Pause Timer
+									</button>
+								{:else if timerSeconds > 0}
+									<button
+										onclick={() => startTimer(Math.ceil(timerSeconds / 60))}
+										class="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-semibold transition"
+									>
+										▶️ Resume Timer
+									</button>
+								{:else}
+									<button
+										onclick={() => startTimer(event.maxPresentationTime!)}
+										class="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-semibold transition"
+									>
+										▶️ Start Timer
+									</button>
+								{/if}
+								
+								<button
+									onclick={stopTimer}
+									class="px-6 py-3 bg-red-600 hover:bg-red-700 text-white rounded-lg font-semibold transition"
+								>
+									⏹ Stop Timer
+								</button>
+							{/if}
+							
+							<button
+								onclick={previousPresentation}
+								disabled={orderedGroups.findIndex((g: any) => g.id === event.currentPresentationId) === 0}
+								class="px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded-lg font-semibold transition"
+							>
+								⏮ Previous
+							</button>
+							
+							<button
+								onclick={nextPresentation}
+								disabled={orderedGroups.findIndex((g: any) => g.id === event.currentPresentationId) === orderedGroups.length - 1}
+								class="px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded-lg font-semibold transition"
+							>
+								Next ⏭
+							</button>
+							
+							<button
+								onclick={endPresentation}
+								class="px-6 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-semibold transition ml-auto"
+							>
+								End Presentation
+							</button>
+						</div>
+					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+</div>
+
+<!-- Join Modal -->
+{#if showJoinModal && !votingSession}
+	<div class="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+		<div class="bg-theater-dark rounded-xl p-8 max-w-md w-full border border-gray-700 shadow-2xl">
+			<h3 class="text-2xl font-bold mb-6">Join as Voter</h3>
+			
+			<form
+				method="POST"
+				action="?/createVotingSession"
+				use:enhance={() => {
+					return async ({ result }) => {
+						if (result.type === 'success' && result.data?.sessionCode) {
+							showJoinModal = false;
+							if (typeof window !== 'undefined') {
+								window.location.href = `?session=${result.data.sessionCode}`;
+							}
+						}
+					};
+				}}
+			>
+				<label class="block mb-6">
+					<span class="block mb-2 font-semibold">Your Display Name</span>
+					<input
+						type="text"
+						name="displayName"
+						bind:value={displayName}
+						placeholder="Enter your name..."
+						required
+						class="w-full px-4 py-3 bg-theater-darker border border-gray-700 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+					/>
+				</label>
+				
+				<div class="flex gap-4">
+					<button
+						type="button"
+						onclick={() => showJoinModal = false}
+						class="flex-1 px-6 py-3 bg-gray-700 hover:bg-gray-600 rounded-lg font-semibold transition"
+					>
+						Cancel
+					</button>
+					<button
+						type="submit"
+						class="flex-1 px-6 py-3 bg-purple-600 hover:bg-purple-700 rounded-lg font-semibold transition"
+					>
+						Join
+					</button>
+				</div>
+			</form>
+		</div>
+	</div>
+{/if}
+
+<style>
+	@keyframes star-pulse {
+		0%, 100% {
+			transform: scale(1);
+		}
+		50% {
+			transform: scale(1.2);
+		}
+	}
+	
+	button:active svg {
+		animation: star-pulse 0.3s ease;
+	}
+</style>
